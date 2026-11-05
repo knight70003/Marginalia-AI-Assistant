@@ -1,6 +1,7 @@
 import os
 import time
 import shutil
+import logging
 from dotenv import load_dotenv
 
 from fastapi import FastAPI, HTTPException, UploadFile, File
@@ -15,6 +16,7 @@ from langchain_core.messages import HumanMessage
 from groq import Groq
 
 load_dotenv()
+logger = logging.getLogger("uvicorn.error")
 groq_client = Groq()   # GROQ_API_KEY .env se leta hai
 
 # ==========================================
@@ -29,7 +31,9 @@ if not os.path.exists(PDF_FILE):
 
 # EMBEDDINGS_BACKEND=fastembed uses a small ONNX model (no torch) so the app fits
 # in low-memory hosts such as Render's free tier. Default keeps the original behaviour.
-if os.getenv("EMBEDDINGS_BACKEND", "huggingface").lower() == "fastembed":
+# On Render (which sets RENDER=true) default to the light backend so no env change is needed.
+DEFAULT_BACKEND = "fastembed" if os.getenv("RENDER") else "huggingface"
+if os.getenv("EMBEDDINGS_BACKEND", DEFAULT_BACKEND).lower() == "fastembed":
     from langchain_community.embeddings import FastEmbedEmbeddings
     embedding_model = FastEmbedEmbeddings(
         model_name="sentence-transformers/all-MiniLM-L6-v2",
@@ -39,13 +43,35 @@ else:
     from langchain_huggingface import HuggingFaceEmbeddings
     embedding_model = HuggingFaceEmbeddings()
 
-# Check if DB already exists to avoid re-indexing on every restart
-if os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR):
-    vectorstores = Chroma(
-        persist_directory=PERSIST_DIR,
-        embedding_function=embedding_model
-    )
-else:
+def _open_existing_index():
+    """Reuse Chroma_db when it is usable; otherwise discard it so it gets rebuilt.
+
+    Handles an empty index and an index built with a different embedding model
+    (dimension mismatch), which would otherwise break every query with a 500.
+    """
+    if not (os.path.exists(PERSIST_DIR) and os.listdir(PERSIST_DIR)):
+        return None
+    store = None
+    try:
+        store = Chroma(persist_directory=PERSIST_DIR, embedding_function=embedding_model)
+        if not store.get(limit=1).get("ids"):
+            return None
+        store.similarity_search("health check", k=1)
+        return store
+    except Exception as e:
+        logger.warning("Existing Chroma_db is unusable (%s). Rebuilding it.", e)
+        try:
+            if store is None:
+                raise RuntimeError("index could not be opened")
+            store.delete_collection()
+        except Exception:
+            shutil.rmtree(PERSIST_DIR, ignore_errors=True)
+        return None
+
+
+# Reuse the existing index to avoid re-indexing on every restart
+vectorstores = _open_existing_index()
+if vectorstores is None:
     loader = PyPDFLoader(PDF_FILE)
     docs = loader.load()
     for doc in docs:
@@ -81,13 +107,17 @@ class QueryRequest(BaseModel):
     query: str
 
 @app.post("/api/query")
-async def process_query(payload: QueryRequest):
+def process_query(payload: QueryRequest):
     query = payload.query.strip()
     if not query:
         raise HTTPException(status_code=400, detail="Query string cannot be empty.")
 
     # Retrieve context chunks
-    result = retriever.invoke(query)
+    try:
+        result = retriever.invoke(query)
+    except Exception as e:
+        logger.exception("Retrieval failed")
+        raise HTTPException(status_code=500, detail=f"Retrieval failed: {type(e).__name__}: {str(e)[:300]}")
     if not result:
         return {
             "found": False,
@@ -111,7 +141,11 @@ Question:
 """
 
     start = time.time()
-    response = model.invoke([HumanMessage(content=prompt)])
+    try:
+        response = model.invoke([HumanMessage(content=prompt)])
+    except Exception as e:
+        logger.exception("LLM call failed")
+        raise HTTPException(status_code=502, detail=f"The language model request failed: {type(e).__name__}: {str(e)[:300]}")
     end = time.time()
     latency = round(end - start, 2)
 
@@ -166,6 +200,28 @@ async def get_documents():
     return {"documents": list_documents()}
 
 
+def _remove_file(path):
+    try:
+        if os.path.exists(path):
+            os.remove(path)
+    except OSError:
+        pass
+
+
+def _purge_from_index(name):
+    data = vectorstores.get(include=["metadatas"])
+    ids = [i for i, m in zip(data.get("ids", []), data.get("metadatas", []))
+           if m and os.path.basename(str(m.get("source", ""))) == name]
+    if ids:
+        vectorstores.delete(ids=ids)
+    return len(ids)
+
+
+@app.get("/api/health")
+def health():
+    return {"status": "ok", "documents": len(list_documents())}
+
+
 @app.post("/api/upload")
 def upload_document(file: UploadFile = File(...)):
     name = os.path.basename(file.filename or "")
@@ -173,29 +229,49 @@ def upload_document(file: UploadFile = File(...)):
     if ext not in LOADERS:
         raise HTTPException(status_code=400, detail="Only PDF, DOCX and TXT files are supported.")
     if name in list_documents():
-        raise HTTPException(status_code=409, detail=f"'{name}' is already indexed.")
+        raise HTTPException(status_code=409, detail=f"'{name}' is already indexed. Remove it first to upload a new version.")
 
     os.makedirs(UPLOAD_DIR, exist_ok=True)
     path = os.path.join(UPLOAD_DIR, name)
-    with open(path, "wb") as out:
-        shutil.copyfileobj(file.file, out)
-    if os.path.getsize(path) > MAX_UPLOAD_MB * 1024 * 1024:
-        os.remove(path)
-        raise HTTPException(status_code=413, detail=f"File is larger than {MAX_UPLOAD_MB} MB.")
-
+    limit = MAX_UPLOAD_MB * 1024 * 1024
+    size = 0
     try:
+        with open(path, "wb") as out:
+            while True:
+                block = file.file.read(1024 * 1024)
+                if not block:
+                    break
+                size += len(block)
+                if size > limit:
+                    raise HTTPException(status_code=413, detail=f"File is larger than {MAX_UPLOAD_MB} MB.")
+                out.write(block)
+        if size == 0:
+            raise HTTPException(status_code=400, detail="The file is empty.")
+
         pages = LOADERS[ext](path).load()
         for p in pages:
             p.page_content = " ".join(p.page_content.split())
             p.metadata["source"] = name
-        chunks = upload_splitter.split_documents(pages)
+        chunks = upload_splitter.split_documents([p for p in pages if p.page_content])
         if not chunks:
-            raise ValueError("no readable text found")
-        vectorstores.add_documents(chunks)
+            raise ValueError("no readable text found (scanned or image-only files need OCR first)")
+        for i in range(0, len(chunks), 64):
+            vectorstores.add_documents(chunks[i:i + 64])
+    except HTTPException:
+        _remove_file(path)
+        raise
+    except ImportError as e:
+        _remove_file(path)
+        logger.exception("Missing package for upload")
+        raise HTTPException(status_code=500, detail=f"A package needed for {ext} files is missing on the server: {e}")
     except Exception as e:
-        if os.path.exists(path):
-            os.remove(path)
-        raise HTTPException(status_code=422, detail=f"Could not process '{name}': {e}")
+        logger.exception("Upload failed")
+        _remove_file(path)
+        try:
+            _purge_from_index(name)
+        except Exception:
+            pass
+        raise HTTPException(status_code=422, detail=f"Could not process '{name}': {str(e)[:300]}")
 
     return {"name": name, "chunks": len(chunks), "status": "ready"}
 
@@ -285,7 +361,7 @@ aside{display:flex;flex-direction:column;gap:14px;padding:16px;min-height:0;tran
 #recTime{font:13px 'Geist Mono',monospace;color:var(--mute);min-width:36px;text-align:right}
 .rdot{width:8px;height:8px;border-radius:50%;background:var(--err);animation:blink 1.1s ease-in-out infinite;flex:none}
 @keyframes blink{50%{opacity:.25}}
-.box.rec textarea,.box.rec #mic,.box.rec #send{display:none}
+.box.rec textarea,.box.rec #mic,.box.rec #send,.box.rec #attach{display:none}
 .tabs{display:grid;grid-template-columns:1fr 1fr;background:var(--glass);border:1px solid var(--line);border-radius:12px;padding:3px}
 .tabs button{padding:6px;border-radius:9px;color:var(--mute);font-weight:500;font-size:13.5px;transition:.2s}
 .tabs button[aria-selected=true]{background:var(--glass2);color:var(--ink);box-shadow:0 1px 6px rgba(0,0,0,.2)}
@@ -409,6 +485,7 @@ textarea{flex:1;border:0;outline:0;background:none;color:var(--ink);font:inherit
   <div id="scroll"><div class="col" id="thread" aria-live="polite"></div></div>
   <div class="comp">
     <div class="box glass">
+      <button class="rb" id="attach" aria-label="Upload documents"><svg viewBox="0 0 24 24"><path d="M21 12.5l-8.6 8.6a5.5 5.5 0 0 1-7.8-7.8l9-9a3.7 3.7 0 0 1 5.2 5.2l-9 9a1.8 1.8 0 0 1-2.6-2.6l8.4-8.4"/></svg></button>
       <textarea id="q" rows="1" placeholder="Ask about your documents" aria-label="Question"></textarea>
       <div class="recbar" id="recbar" hidden>
         <button class="rb" id="recCancel" aria-label="Cancel recording"><svg viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
@@ -563,6 +640,7 @@ function actions(m,c,idx,errOnly){
 }
 
 /* ask / regenerate */
+async function readJson(r){const t=await r.text();try{return JSON.parse(t)}catch(e){return{detail:r.ok?'Unexpected response from the server.':'Server error ('+r.status+'). Check the server logs for details.'}}}
 const input=$('#q');
 input.addEventListener('input',()=>{input.style.height='auto';input.style.height=input.scrollHeight+'px'});
 input.addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey&&!e.isComposing){e.preventDefault();ask()}});
@@ -583,7 +661,7 @@ async function run(c,query){
   const tr=thinkRow();$('#thread').appendChild(tr);toEnd();
   try{
     const res=await fetch('/api/query',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({query})});
-    const d=await res.json();
+    const d=await readJson(res);
     if(!res.ok)throw new Error(typeof d.detail==='string'?d.detail:'The request failed.');
     c.messages.push({role:'ai',found:d.found,text:String(d.answer||''),sources:d.sources,latency:d.latency,tokens:d.tokens});
   }catch(err){c.messages.push({role:'ai',error:true,text:'Something went wrong: '+err.message+' Check that the server is running, then try again.'})}
@@ -611,9 +689,13 @@ function renderDocs(){
   });
 }
 async function loadDocs(){
-  try{const d=await(await fetch('/api/documents')).json();
-    docs=docs.filter(x=>x.status!=='ready').concat((d.documents||[]).filter(n=>!docs.some(x=>x.name===n)).map(n=>({name:n,ext:extOf(n),status:'ready'})));
-    docs=docs.concat([]);renderDocs()}catch(e){}
+  try{
+    const r=await fetch('/api/documents');if(!r.ok)return;
+    const names=((await r.json()).documents)||[];
+    const local=docs.filter(x=>x.status!=='ready'||names.includes(x.name));
+    names.forEach(n=>{if(!local.some(x=>x.name===n))local.push({name:n,ext:extOf(n),status:'ready'})});
+    docs=local;renderDocs();
+  }catch(e){}
 }
 async function removeDoc(d){
   if(d.status==='error'){docs=docs.filter(x=>x!==d);renderDocs();return}
@@ -636,11 +718,12 @@ function upload(files){
     x.upload.onload=()=>{d.status='processing';renderDocs()};
     x.onload=()=>{let j={};try{j=JSON.parse(x.responseText)}catch(e){}
       if(x.status>=200&&x.status<300){d.status='ready';d.detail=j.chunks+' passages indexed';renderDocs();toast(f.name+' is ready')}
-      else fail(typeof j.detail==='string'?j.detail:'Upload failed.')};
-    x.onerror=()=>fail('Network error. Is the server running?');
+      else fail(typeof j.detail==='string'?j.detail:'Upload failed (server error '+x.status+'). Check the server logs.')};
+    x.onerror=()=>fail('Connection lost. The server may have restarted (out of memory) or is unreachable.');
     x.send(fd);
   });
 }
+$('#attach').onclick=()=>$('#file').click();
 $('#file').onchange=e=>{upload([...e.target.files]);e.target.value=''};
 const dz=$('#drop');
 ['dragover','dragenter'].forEach(v=>dz.addEventListener(v,e=>{e.preventDefault();dz.classList.add('over')}));
@@ -695,7 +778,7 @@ async function onStop(){
   try{
     const fd=new FormData();fd.append('file',new Blob(chunks,{type}),'audio.'+ext);
     const r=await fetch('/api/transcribe',{method:'POST',body:fd});
-    const d=await r.json();
+    const d=await readJson(r);
     if(!r.ok)throw new Error(typeof d.detail==='string'?d.detail:'Transcription failed.');
     const text=(d.text||'').trim();
     if(!text)toast('No speech detected.');
@@ -718,5 +801,3 @@ renderDocs();loadDocs();
 @app.get("/", response_class=HTMLResponse)
 async def serve_ui():
     return INDEX_HTML
-  
-  
