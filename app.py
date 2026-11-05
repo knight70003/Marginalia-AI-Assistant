@@ -2,7 +2,7 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma.vectorstores import Chroma
-from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_groq import ChatGroq
 from langchain_core.messages import HumanMessage
 from dotenv import load_dotenv
 import time
@@ -36,7 +36,7 @@ if not result:
     exit()
 
     
-model = ChatGoogleGenerativeAI(model="gemini-3.6-flash")
+model = ChatGroq(model="openai/gpt-oss-120b")
 context = "\n\n".join([r.page_content for r in result])
 prompt = f"""
 You are an AI assistant.

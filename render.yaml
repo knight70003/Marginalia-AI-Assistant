@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: marginalia-rag
+    runtime: python
+    plan: free
+    region: singapore
+    buildCommand: pip install -r requirements-render.txt && python -c "from fastembed import TextEmbedding; TextEmbedding('sentence-transformers/all-MiniLM-L6-v2', cache_dir='models')"
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/documents
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: EMBEDDINGS_BACKEND
+        value: fastembed
+      - key: GROQ_API_KEY
+        sync: false

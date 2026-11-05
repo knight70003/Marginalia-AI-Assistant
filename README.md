@@ -36,7 +36,7 @@ A production-ready, low-cost Retrieval-Augmented Generation (RAG) system built w
 |          | (Formatted Response)       | (Grounded Answer)          v              |
 |          |                            |                 +----------------------+  |
 |          |                      +-----------+           | Similarity Search    |  |
-|          +--------------------- | Gemini    | <-------- | Top-K Chunks         |  |
+|          +--------------------- | GROQ      | <-------- | Top-K Chunks         |  |
 |                                 | LLM Engine|  (Context)| (k=3 / Metadata)     |  |
 |                                 +-----------+           +----------------------+  |
 +-----------------------------------------------------------------------------------+
@@ -190,7 +190,7 @@ pip install -r requirements.txt
 Create a `.env` file in the root directory:
 
 ```env
-GEMINI_API_KEY=your_gemini_api_key_here
+GROQ_API_KEY=your_groq_api_key_here
 
 ```
 
@@ -199,7 +199,7 @@ GEMINI_API_KEY=your_gemini_api_key_here
 To launch the API and Web UI application server:
 
 ```powershell
-uvicorn Ulapp:app --reload --host 0.0.0.0 --port 8000
+uvicorn UIapp:app --reload --host 0.0.0.0 --port 8000
 
 ```
 
@@ -235,3 +235,8 @@ While embedded ChromaDB is optimal for single-node deployments and low-to-medium
 
 
 * **Generation Layer:** Gemini-based prompt grounding proved highly accurate. The LLM strictly respects context boundaries, eliminating false hallucinations.
+
+
+
+
+
