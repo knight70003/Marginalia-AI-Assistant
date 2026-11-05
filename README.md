@@ -45,8 +45,8 @@ A production-ready, low-cost Retrieval-Augmented Generation (RAG) system built w
 |                                 EVALUATION PHASE                                  |
 |                                                                                   |
 |  +---------------------+      +-----------------------+     +------------------+  |
-|  | ground_truth.json   | ---> | evaluation/           | --> |Terminal Benchmark|  |
-|  | (Expected Pages)    |      | evaluate.py           |     |Output Report     |  |
+|  | ground_truth.json   | ---> | evaluation/           | --> | Terminal Benchmark| |
+|  | (Expected Pages)    |      | evaluate.py           |     | Output Report    |  |
 |  +---------------------+      +-----------------------+     +------------------+  |
 |                                           ^                                       |
 |  +---------------------+                  |                                       |
@@ -116,7 +116,7 @@ PROBLEM 1/
  | Open-source 384-dimensional dense vectors with superior semantic similarity accuracy for PDF docs.
 
  |
-| **LLM Engine** | `ChatGoogleGenerativeAI` (`gemini-2.5-flash`)
+| **LLM Engine** | `ChatGroq` (`openai/gpt-oss-120b`)
 
  | Sub-second generation response time, cost-efficient token pricing, and high contextual adherence.
 
@@ -235,11 +235,8 @@ While embedded ChromaDB is optimal for single-node deployments and low-to-medium
 
 
 * **Generation Layer:** Gemini-based prompt grounding proved highly accurate. The LLM strictly respects context boundaries, eliminating false hallucinations.
-<<<<<<< HEAD
 
 
 
 
 
-=======
->>>>>>> ea2eda3cacc45a130fa5fcc1a02250ee147e1f99
