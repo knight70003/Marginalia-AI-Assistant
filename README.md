@@ -45,8 +45,8 @@ A production-ready, low-cost Retrieval-Augmented Generation (RAG) system built w
 |                                 EVALUATION PHASE                                  |
 |                                                                                   |
 |  +---------------------+      +-----------------------+     +------------------+  |
-|  | ground_truth.json   | ---> | evaluation/           | --> | Terminal Benchmark| |
-|  | (Expected Pages)    |      | evaluate.py           |     | Output Report    |  |
+|  | ground_truth.json   | ---> | evaluation/           | --> |Terminal Benchmark|  |
+|  | (Expected Pages)    |      | evaluate.py           |     |Output Report     |  |
 |  +---------------------+      +-----------------------+     +------------------+  |
 |                                           ^                                       |
 |  +---------------------+                  |                                       |
@@ -235,8 +235,11 @@ While embedded ChromaDB is optimal for single-node deployments and low-to-medium
 
 
 * **Generation Layer:** Gemini-based prompt grounding proved highly accurate. The LLM strictly respects context boundaries, eliminating false hallucinations.
+<<<<<<< HEAD
 
 
 
 
 
+=======
+>>>>>>> ea2eda3cacc45a130fa5fcc1a02250ee147e1f99
