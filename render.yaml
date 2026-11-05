@@ -9,7 +9,7 @@ services:
     healthCheckPath: /api/documents
     envVars:
       - key: PYTHON_VERSION
-        value: 3.11.9
+        value: 3.12.0
       - key: EMBEDDINGS_BACKEND
         value: fastembed
       - key: GROQ_API_KEY
